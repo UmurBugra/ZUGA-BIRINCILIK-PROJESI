@@ -55,7 +55,7 @@ static float acceleration_mg[3];
 static uint8_t whoamI, rst;
 stmdev_ctx_t dev_ctx;
 volatile uint8_t acil_durum_var = 0; // Interrupt ile ana döngü haberleşecek
-
+volatile uint8_t alarm_tipi = 0;
 // Sensöre Yazma Fonksiyonu
 static int32_t platform_write(void *handle, uint8_t reg, const uint8_t *bufp, uint16_t len)
 {
@@ -144,66 +144,61 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
    while (1)
-    {
-      uint8_t reg;
+   {
+     // --- 1. SENSÖR OKUMA (Sadece alarm yoksa oku) ---
+     if (alarm_tipi == 0) {
+         uint8_t reg;
+         lis2dw12_flag_data_ready_get(&dev_ctx, &reg);
+         if (reg)
+         {
+           memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
+           lis2dw12_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
 
-      // --- 1. SENSÖR OKUMA ---
-      lis2dw12_flag_data_ready_get(&dev_ctx, &reg);
-      if (reg)
-      {
-        memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
-        lis2dw12_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+           acceleration_mg[0] = lis2dw12_from_fs2_to_mg(data_raw_acceleration[0]);
+           acceleration_mg[1] = lis2dw12_from_fs2_to_mg(data_raw_acceleration[1]);
+           acceleration_mg[2] = lis2dw12_from_fs2_to_mg(data_raw_acceleration[2]);
 
-        acceleration_mg[0] = lis2dw12_from_fs2_to_mg(data_raw_acceleration[0]);
-        acceleration_mg[1] = lis2dw12_from_fs2_to_mg(data_raw_acceleration[1]);
-        acceleration_mg[2] = lis2dw12_from_fs2_to_mg(data_raw_acceleration[2]);
+           int toplam_ivme = abs((int)acceleration_mg[0]) + abs((int)acceleration_mg[1]) + abs((int)acceleration_mg[2]);
 
-        // Toplam İvme Hesabı
-        int toplam_ivme = abs((int)acceleration_mg[0]) + abs((int)acceleration_mg[1]) + abs((int)acceleration_mg[2]);
+           if (toplam_ivme > 1900) // Eşik Değer
+           {
+               alarm_tipi = 1; // Düşme Tespit Edildi
+           }
+         }
+     }
 
-        // Eşik Değer (Düşme Algılama) - Hassasiyeti ayarladığımız değer (1900)
-        if (toplam_ivme > 1900)
-        {
-            acil_durum_var = 1; // Düşme algılandı!
-        }
-      }
+     // --- 2. ALARM YÖNETİMİ ---
+     if (alarm_tipi > 0)
+     {
+         // Görsel/İşitsel Uyarı
+         for(int i = 0; i < 4; i++)
+         {
+             HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_SET);
+             HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+             HAL_Delay(80);
+             HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_RESET);
+             HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+             HAL_Delay(80);
+         }
 
-      // --- 2. ACİL DURUM YÖNETİMİ ---
-      if (acil_durum_var == 1)
-            {
-                // Görsel Uyarı (LED & Buzzer)
-                for(int i = 0; i < 4; i++)
-                {
-                    HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_SET);
-                    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
-                    HAL_Delay(100);
-                    HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_RESET);
-                    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
-                    HAL_Delay(100);
-                }
+         // ESP32'ye Mesaj Gönder
+         char msg[10];
 
-                // --- KRİTİK DÜZELTME: Sadece Düz Yazı Gönder ---
-                // Alt satır ('\n') karakteri çok önemlidir, ESP32 bunu bitiş işareti olarak görür.
-                char msg[] = "DUSME\n";
+         if (alarm_tipi == 1) {
+             sprintf(msg, "DUSME\n"); // Düşme ise
+         } else if (alarm_tipi == 2) {
+             sprintf(msg, "BUTON\n"); // Buton ise
+         }
 
-                // ESP32'ye Giden Hat (USART2 - PA2/PA3)
-                HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+         HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100); // ESP32'ye
+         HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100); // Bilgisayara
 
-                // Bilgisayara Debug Hattı (USART1 - PA9/PA10)
-                HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
+         HAL_Delay(1000); // Spam engelleme
+         alarm_tipi = 0;  // Sistemi sıfırla
+     }
 
-                // 1 saniye bekle (Spam yapmasın)
-                HAL_Delay(1000);
-
-                acil_durum_var = 0; // Bayrağı indir
-            }
-
-      HAL_Delay(50); // Örnekleme hızı
-
-      /* USER CODE END WHILE */
-
-      /* USER CODE BEGIN 3 */
-    }
+     HAL_Delay(20);
+   }
   /* USER CODE END 3 */
 }
 
@@ -392,9 +387,6 @@ static void MX_USART2_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();
@@ -408,10 +400,13 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PANIK_BTN_Pin */
+  /* --- DÜZELTME BURADA --- */
+  /*Configure GPIO pin : PANIK_BTN_Pin (PB2) */
   GPIO_InitStruct.Pin = PANIK_BTN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  // HATA: GPIO_MODE_IT_RISING idi -> DOĞRUSU: GPIO_MODE_IT_FALLING
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  // ÖNERİ: GPIO_NOPULL yerine GPIO_PULLUP daha kararlı çalışır
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(PANIK_BTN_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : BUZZER_Pin */
@@ -431,18 +426,17 @@ static void MX_GPIO_Init(void)
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI2_3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI2_3_IRQn);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
-  if(GPIO_Pin == PANIK_BTN_Pin) // Eğer basılan PB2 ise (Label verdiysen PANIK_BTN_Pin olur, vermediysen GPIO_PIN_2)
+  if(GPIO_Pin == PANIK_BTN_Pin) // Butona basıldı!
   {
-    acil_durum_var = 1; // Bayrağı kaldır
+    // Eğer hali hazırda bir alarm yoksa buton alarmını set et
+    if(alarm_tipi == 0) {
+        alarm_tipi = 2;
+    }
   }
 }
 /* USER CODE END 4 */
